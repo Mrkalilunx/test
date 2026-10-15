@@ -11,42 +11,60 @@ jobs:
   build:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        arch: [x86_64, aarch64, armv7, i686, riscv64]
+        include:
+          - arch: x86_64
+            cc: gcc
+            target: helloworld-x86_64
+            flags: -Wall -Wextra -O2
+          - arch: i686
+            cc: gcc
+            target: helloworld-i686
+            flags: -m32 -Wall -Wextra -O2
+          - arch: aarch64
+            cc: aarch64-linux-gnu-gcc
+            target: helloworld-aarch64
+            flags: -Wall -Wextra -O2
+          - arch: armv7
+            cc: arm-linux-gnueabihf-gcc
+            target: helloworld-armv7
+            flags: -Wall -Wextra -O2
+          - arch: riscv64
+            cc: riscv64-linux-gnu-gcc
+            target: helloworld-riscv64
+            flags: -Wall -Wextra -O2
+
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install cross compiler
+      - name: Install cross toolchains
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y \
-            gcc-aarch64-linux-gnu \
-            gcc-arm-linux-gnueabihf \
-            gcc-riscv64-linux-gnu \
-            gcc-multilib
-
-      - name: Build helloworld for ${{ matrix.arch }}
-        run: |
           case "${{ matrix.arch }}" in
-            x86_64)
-              gcc -Wall -Wextra -O2 -o helloworld-${{ matrix.arch }} main.c
-              ;;
-            i686)
-              gcc -m32 -Wall -Wextra -O2 -o helloworld-${{ matrix.arch }} main.c
-              ;;
             aarch64)
-              aarch64-linux-gnu-gcc -Wall -Wextra -O2 -o helloworld-${{ matrix.arch }} main.c
+              sudo apt-get install -y gcc-aarch64-linux-gnu
               ;;
             armv7)
-              arm-linux-gnueabihf-gcc -Wall -Wextra -O2 -o helloworld-${{ matrix.arch }} main.c
+              sudo apt-get install -y gcc-arm-linux-gnueabihf
               ;;
             riscv64)
-              riscv64-linux-gnu-gcc -Wall -Wextra -O2 -o helloworld-${{ matrix.arch }} main.c
+              sudo apt-get install -y gcc-riscv64-linux-gnu
+              ;;
+            i686)
+              sudo apt-get install -y gcc-multilib
+              ;;
+            x86_64)
+              sudo apt-get install -y build-essential
               ;;
           esac
 
-      - name: Upload artifact for ${{ matrix.arch }}
+      - name: Build
+        run: |
+          ${{ matrix.cc }} ${{ matrix.flags }} -o ${{ matrix.target }} main.c
+
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: helloworld-${{ matrix.arch }}
-          path: helloworld-${{ matrix.arch }}
+          name: ${{ matrix.target }}
+          path: ${{ matrix.target }}
