@@ -1,4 +1,4 @@
-name: build
+name: build-multiarch
 
 on:
   push:
@@ -10,17 +10,43 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [x86_64, aarch64, armv7, i686, riscv64]
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build C with gcc
-        run: gcc -Wall -Wextra -o helloworld main.c
+      - name: Install cross compiler
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            gcc-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabihf \
+            gcc-riscv64-linux-gnu \
+            gcc-multilib
 
-      - name: Run binary
-        run: ./helloworld
+      - name: Build helloworld for ${{ matrix.arch }}
+        run: |
+          case "${{ matrix.arch }}" in
+            x86_64)
+              gcc -Wall -Wextra -O2 -o helloworld-${{ matrix.arch }} main.c
+              ;;
+            i686)
+              gcc -m32 -Wall -Wextra -O2 -o helloworld-${{ matrix.arch }} main.c
+              ;;
+            aarch64)
+              aarch64-linux-gnu-gcc -Wall -Wextra -O2 -o helloworld-${{ matrix.arch }} main.c
+              ;;
+            armv7)
+              arm-linux-gnueabihf-gcc -Wall -Wextra -O2 -o helloworld-${{ matrix.arch }} main.c
+              ;;
+            riscv64)
+              riscv64-linux-gnu-gcc -Wall -Wextra -O2 -o helloworld-${{ matrix.arch }} main.c
+              ;;
+          esac
 
-      - name: Upload artifact
+      - name: Upload artifact for ${{ matrix.arch }}
         uses: actions/upload-artifact@v4
         with:
-          name: helloworld-linux
-          path: helloworld
+          name: helloworld-${{ matrix.arch }}
+          path: helloworld-${{ matrix.arch }}
