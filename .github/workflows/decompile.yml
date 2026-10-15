@@ -43,7 +43,7 @@ jobs:
       - name: Decompile sample with Ghidra headless
         run: |
           set -euo pipefail
-          mkdir -p out
+          mkdir -p out "$RUNNER_TEMP/ghidraproj"
           "$GHIDRA_DIR/support/analyzeHeadless" \
             "$RUNNER_TEMP/ghidraproj" decomp \
             -import "$PWD/$SAMPLE" \
