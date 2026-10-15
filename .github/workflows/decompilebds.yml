@@ -34,15 +34,13 @@ jobs:
           unzip -q "/tmp/${ZIP}" -d "$HOME"
           echo "GHIDRA_DIR=$HOME/ghidra_${GHIDRA_VERSION}_PUBLIC" >> "$GITHUB_ENV"
 
-      - name: Download Bedrock Dedicated Server and extract bedrock_server
+      - name: Download bedrock_server from release
         run: |
           set -euo pipefail
           mkdir -p work
-          URL="https://www.minecraft.net/bedrockdedicatedserver/bin-linux/bedrock-server-${{ inputs.bds_version }}.zip"
+          URL="https://github.com/Mrkalilunx/test/releases/download/bds-${{ inputs.bds_version }}/bedrock_server"
           echo "downloading $URL"
-          curl -fL --retry 3 --http1.1 -o work/bds.zip "$URL"
-          ls -lh work/bds.zip
-          unzip -o -q work/bds.zip bedrock_server -d work
+          curl -fL --retry 3 --http1.1 -o work/bedrock_server "$URL"
           chmod +x work/bedrock_server
           ls -lh work/bedrock_server
           file work/bedrock_server
