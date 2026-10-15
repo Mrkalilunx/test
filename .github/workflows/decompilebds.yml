@@ -15,7 +15,7 @@ env:
 jobs:
   bedrock:
     runs-on: ubuntu-latest
-    timeout-minutes: 355
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v4
 
@@ -51,12 +51,14 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p out "$RUNNER_TEMP/ghidraproj"
+          nproc
+          free -h
           time "$GHIDRA_DIR/support/analyzeHeadless" \
             "$RUNNER_TEMP/ghidraproj" bds \
             -import "$PWD/work/bedrock_server" \
             -scriptPath "$PWD/ghidra" \
             -postScript decompall.java "$PWD/out/bedrock_server.c" \
-            -analysisTimeoutPerFile 5400 \
+            -analysisTimeoutPerFile 3600 \
             -max-cpu 4 \
             -deleteProject
 
