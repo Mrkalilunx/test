@@ -1,0 +1,38 @@
+name: sysinfo
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/sysinfo.yml'
+
+jobs:
+  info:
+    runs-on: ubuntu-latest
+    steps:
+      - name: OS / kernel
+        run: |
+          echo "== uname =="; uname -a
+          echo "== os-release =="; cat /etc/os-release
+          echo "== hostname =="; hostname
+
+      - name: CPU
+        run: |
+          echo "== lscpu =="; lscpu
+          echo "== nproc =="; nproc
+          echo "== cpuinfo model =="; grep -m1 'model name' /proc/cpuinfo
+
+      - name: Memory
+        run: |
+          echo "== free -h =="; free -h
+          echo "== meminfo =="; grep -E 'MemTotal|MemFree|MemAvailable|SwapTotal' /proc/meminfo
+
+      - name: Disk
+        run: |
+          echo "== df -h =="; df -h
+          echo "== block =="; lsblk
+
+      - name: Identity / limits
+        run: |
+          echo "== whoami =="; whoami; id
+          echo "== ulimit =="; ulimit -a
