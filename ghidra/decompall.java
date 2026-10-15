@@ -18,8 +18,8 @@ import ghidra.util.task.ConsoleTaskMonitor;
 
 public class decompall extends GhidraScript {
 
-    // 单函数反编译超时秒数
-    private static final int TIMEOUT_SEC = 60;
+    // 单函数反编译超时秒数,大二进制下调可避免整体超时
+    private static final int TIMEOUT_SEC = 30;
 
     @Override
     protected void run() throws Exception

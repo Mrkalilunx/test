@@ -1,2 +1,5 @@
 artifacts/
 helloworld
+work/
+*.zip
+sample/bedrock_server

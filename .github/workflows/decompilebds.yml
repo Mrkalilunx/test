@@ -1,0 +1,79 @@
+name: decompile-bds
+
+on:
+  workflow_dispatch:
+    inputs:
+      bds_version:
+        description: Bedrock Dedicated Server 版本
+        required: true
+        default: 1.26.52.3
+
+env:
+  GHIDRA_VERSION: 12.1.4
+  GHIDRA_DATE: 20260921
+
+jobs:
+  bedrock:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Install Ghidra
+        run: |
+          set -euo pipefail
+          ZIP="ghidra_${GHIDRA_VERSION}_PUBLIC_${GHIDRA_DATE}.zip"
+          URL="https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_${GHIDRA_VERSION}_build/${ZIP}"
+          curl -fL --retry 3 -o "/tmp/${ZIP}" "$URL"
+          unzip -q "/tmp/${ZIP}" -d "$HOME"
+          echo "GHIDRA_DIR=$HOME/ghidra_${GHIDRA_VERSION}_PUBLIC" >> "$GITHUB_ENV"
+
+      - name: Download Bedrock Dedicated Server and extract bedrock_server
+        run: |
+          set -euo pipefail
+          mkdir -p work
+          URL="https://www.minecraft.net/bedrockdedicatedserver/bin-linux/bedrock-server-${{ inputs.bds_version }}.zip"
+          echo "downloading $URL"
+          curl -fL --retry 3 -o work/bds.zip "$URL"
+          ls -lh work/bds.zip
+          unzip -o -q work/bds.zip bedrock_server -d work
+          chmod +x work/bedrock_server
+          ls -lh work/bedrock_server
+          file work/bedrock_server
+
+      - name: Decompile bedrock_server with Ghidra headless
+        env:
+          GHIDRA_HEADLESS_MAXMEM: 12G
+        run: |
+          set -euo pipefail
+          mkdir -p out "$RUNNER_TEMP/ghidraproj"
+          time "$GHIDRA_DIR/support/analyzeHeadless" \
+            "$RUNNER_TEMP/ghidraproj" bds \
+            -import "$PWD/work/bedrock_server" \
+            -scriptPath "$PWD/ghidra" \
+            -postScript decompall.java "$PWD/out/bedrock_server.c" \
+            -analysisTimeoutPerFile 5400 \
+            -max-cpu 4 \
+            -deleteProject
+
+      - name: Inspect result
+        if: always()
+        run: |
+          ls -lh out/ || true
+          wc -l out/*.c || true
+          du -h out/*.c || true
+          sed -n '1,30p' out/*.c || true
+
+      - name: Upload decompiled C
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: decompiled-bds
+          path: out/
+          if-no-files-found: warn
