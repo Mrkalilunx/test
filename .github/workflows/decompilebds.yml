@@ -40,7 +40,7 @@ jobs:
           mkdir -p work
           URL="https://www.minecraft.net/bedrockdedicatedserver/bin-linux/bedrock-server-${{ inputs.bds_version }}.zip"
           echo "downloading $URL"
-          curl -fL --retry 3 -o work/bds.zip "$URL"
+          curl -fL --retry 3 --http1.1 -o work/bds.zip "$URL"
           ls -lh work/bds.zip
           unzip -o -q work/bds.zip bedrock_server -d work
           chmod +x work/bedrock_server
