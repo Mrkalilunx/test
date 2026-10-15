@@ -45,6 +45,21 @@ jobs:
           ls -lh work/bedrock_server
           file work/bedrock_server
 
+      - name: Validate decompile script on small sample
+        env:
+          GHIDRA_HEADLESS_MAXMEM: 4G
+        run: |
+          set -euo pipefail
+          mkdir -p out "$RUNNER_TEMP/valproj"
+          "$GHIDRA_DIR/support/analyzeHeadless" \
+            "$RUNNER_TEMP/valproj" val \
+            -import "$PWD/sample/helloaarch64" \
+            -scriptPath "$PWD/ghidra" \
+            -postScript decompall.java "$PWD/out/validate.c" \
+            -deleteProject
+          test -s out/validate.c
+          echo "validate function blocks: $(grep -c '^// function ' out/validate.c)"
+
       - name: Decompile bedrock_server with Ghidra headless
         env:
           GHIDRA_HEADLESS_MAXMEM: 12G

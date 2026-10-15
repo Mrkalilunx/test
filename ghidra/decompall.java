@@ -164,11 +164,12 @@ public class decompall extends GhidraScript {
         }
 
         @Override
-        public Result process(Function func, TaskMonitor m)
+        public Result process(Function func, TaskMonitor m) throws Exception
         {
             if (m.isCancelled()) {
                 return null;
             }
+            // pool.get() 会抛受检异常
             DecompInterface di = pool.get();
             try {
                 DecompileResults res = di.decompileFunction(func, TIMEOUT_SEC, m);
