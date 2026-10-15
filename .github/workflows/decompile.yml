@@ -1,0 +1,65 @@
+name: decompile
+
+on:
+  push:
+    paths:
+      - 'sample/**'
+      - 'ghidra/**'
+      - '.github/workflows/decompile.yml'
+  pull_request:
+    paths:
+      - 'sample/**'
+      - 'ghidra/**'
+      - '.github/workflows/decompile.yml'
+  workflow_dispatch:
+
+jobs:
+  ghidra:
+    runs-on: ubuntu-latest
+    env:
+      GHIDRA_VERSION: 12.1.4
+      GHIDRA_DATE: 20260921
+      SAMPLE: sample/helloaarch64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Install Ghidra
+        run: |
+          set -euo pipefail
+          ZIP="ghidra_${GHIDRA_VERSION}_PUBLIC_${GHIDRA_DATE}.zip"
+          URL="https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_${GHIDRA_VERSION}_build/${ZIP}"
+          echo "downloading $URL"
+          curl -fL --retry 3 -o "/tmp/${ZIP}" "$URL"
+          unzip -q "/tmp/${ZIP}" -d "$HOME"
+          echo "GHIDRA_DIR=$HOME/ghidra_${GHIDRA_VERSION}_PUBLIC" >> "$GITHUB_ENV"
+          ls "$HOME/ghidra_${GHIDRA_VERSION}_PUBLIC/support/analyzeHeadless"
+
+      - name: Decompile sample with Ghidra headless
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          "$GHIDRA_DIR/support/analyzeHeadless" \
+            "$RUNNER_TEMP/ghidraproj" decomp \
+            -import "$PWD/$SAMPLE" \
+            -scriptPath "$PWD/ghidra" \
+            -postScript decompall.java "$PWD/out/${SAMPLE##*/}.c" \
+            -deleteProject
+
+      - name: Inspect result
+        run: |
+          set -euo pipefail
+          ls -lh out/
+          echo "line count: $(wc -l < out/*.c)"
+          sed -n '1,40p' out/*.c
+
+      - name: Upload decompiled C
+        uses: actions/upload-artifact@v4
+        with:
+          name: decompiled-c
+          path: out/
