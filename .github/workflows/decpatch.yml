@@ -1,0 +1,128 @@
+name: decompile-bds-patch
+
+on:
+  workflow_dispatch:
+    inputs:
+      bds_version:
+        description: Bedrock Dedicated Server 版本
+        required: true
+        default: 1.26.52.3
+      analysis_timeout:
+        description: 分析阶段上限秒数,须与建库时一致
+        required: true
+        default: "3600"
+      slices:
+        description: 失败函数切片数,越小每片越快
+        required: true
+        default: "24"
+      retry_timeout:
+        description: 回填单函数超时秒数
+        required: true
+        default: "300"
+      slice_filter:
+        description: 只跑指定切片,逗号分隔,留空为全部
+        required: false
+        default: ""
+
+env:
+  GHIDRA_VERSION: 12.1.4
+  GHIDRA_DATE: 20260921
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      slicelist: ${{ steps.gen.outputs.slicelist }}
+      slicecount: ${{ steps.gen.outputs.slicecount }}
+    steps:
+      - name: Generate slice list
+        id: gen
+        run: |
+          set -euo pipefail
+          f="${{ inputs.slice_filter }}"
+          if [ -n "$f" ]; then
+            list="$f"
+          else
+            n="${{ inputs.slices }}"
+            list="$(seq 0 $((n - 1)) | paste -sd, -)"
+          fi
+          echo "slicecount=${{ inputs.slices }}" >> "$GITHUB_OUTPUT"
+          echo "slicelist=[$list]" >> "$GITHUB_OUTPUT"
+          echo "slices=$list"
+
+  patch:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        slice: ${{ fromJSON(needs.plan.outputs.slicelist) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Install Ghidra
+        run: |
+          set -euo pipefail
+          ZIP="ghidra_${GHIDRA_VERSION}_PUBLIC_${GHIDRA_DATE}.zip"
+          URL="https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_${GHIDRA_VERSION}_build/${ZIP}"
+          curl -fL --retry 3 -o "/tmp/${ZIP}" "$URL"
+          unzip -q "/tmp/${ZIP}" -d "$HOME"
+          echo "GHIDRA_DIR=$HOME/ghidra_${GHIDRA_VERSION}_PUBLIC" >> "$GITHUB_ENV"
+
+      - name: Download bedrock_server from release
+        run: |
+          set -euo pipefail
+          mkdir -p work
+          URL="https://github.com/Mrkalilunx/test/releases/download/bds-${{ inputs.bds_version }}/bedrock_server"
+          curl -fL --retry 3 --http1.1 -o work/bedrock_server "$URL"
+          chmod +x work/bedrock_server
+
+      - name: Restore analyzed project
+        uses: actions/cache/restore@v4
+        with:
+          path: proj
+          key: bdsproj-v1-${{ inputs.bds_version }}-ghidra${{ env.GHIDRA_VERSION }}-at${{ inputs.analysis_timeout }}
+          fail-on-cache-miss: true
+
+      - name: Build patch input
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          IN="$PWD/out/patch-${{ matrix.slice }}.c"
+          awk -v s="${{ matrix.slice }}" -v n="${{ needs.plan.outputs.slicecount }}" \
+            'NR % n == s { print; print "// decompile failed" }' \
+            ghidra/failedlist.txt > "$IN"
+          echo "slice ${{ matrix.slice }} input blocks: $(grep -c '^// function ' "$IN" || true)"
+
+      - name: Retry failed functions
+        env:
+          GHIDRA_HEADLESS_MAXMEM: 12G
+        run: |
+          set -euo pipefail
+          OUT="$PWD/out/patch-${{ matrix.slice }}.c"
+          time "$GHIDRA_DIR/support/analyzeHeadless" \
+            "$PWD/proj" bds \
+            -process bedrock_server \
+            -noanalysis \
+            -scriptPath "$PWD/ghidra" \
+            -postScript decompall.java "$OUT" 0 1 retry ${{ inputs.retry_timeout }} \
+            -max-cpu 4
+          total=$(grep -c '^// function ' "$OUT" || true)
+          left=$(grep -c '^// decompile failed' "$OUT" || true)
+          echo "recovered $((total - left)) of $total, still failed $left"
+
+      - name: Upload patch
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: patch-${{ matrix.slice }}
+          path: out/patch-${{ matrix.slice }}.c
+          if-no-files-found: warn
+          retention-days: 3
