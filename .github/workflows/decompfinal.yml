@@ -1,0 +1,95 @@
+name: decompile-bds-final
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_run:
+        description: 含原始 shard-* 产物的运行 id
+        required: true
+      fix_runs:
+        description: 含 shardfix-* 产物的运行 id,逗号分隔;靠后的覆盖靠前的
+        required: true
+      shards:
+        description: 分片总数
+        required: true
+        default: "8"
+
+jobs:
+  assemble:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Download original shards
+        uses: actions/download-artifact@v4
+        with:
+          pattern: shard-*
+          path: orig
+          merge-multiple: true
+          run-id: ${{ inputs.source_run }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download fixed shards from fix runs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p fixed
+          for r in $(echo "${{ inputs.fix_runs }}" | tr ',' ' '); do
+            echo "=== run $r ==="
+            gh api "repos/${{ github.repository }}/actions/runs/$r/artifacts?per_page=100" \
+              --jq '.artifacts[] | select(.name|startswith("shardfix-")) | "\(.id) \(.name)"' > list.txt
+            while read -r aid aname; do
+              [ -z "${aid:-}" ] && continue
+              n="${aname#shardfix-}"
+              curl -sL -H "Authorization: Bearer $GH_TOKEN" \
+                "https://api.github.com/repos/${{ github.repository }}/actions/artifacts/$aid/zip" -o a.zip
+              rm -rf tmpd && mkdir tmpd
+              unzip -oq a.zip -d tmpd
+              cp "tmpd/shard-$n.c" "fixed/shard-$n.c"
+              echo "got shard $n ($(grep -c '^// function ' "fixed/shard-$n.c") blocks, $(grep -c '^// decompile failed' "fixed/shard-$n.c" || true) failed)"
+            done < list.txt
+          done
+          echo "fixed shards:"; ls -lh fixed || true
+
+      - name: Merge best shards
+        run: |
+          set -euo pipefail
+          n="${{ inputs.shards }}"
+          : > bedrock_server.c
+          tot=0
+          bad=0
+          miss=0
+          for i in $(seq 0 $((n - 1))); do
+            f="fixed/shard-$i.c"
+            src="fixed"
+            if [ ! -s "$f" ]; then
+              f="orig/shard-$i.c"
+              src="orig"
+            fi
+            if [ ! -s "$f" ]; then
+              echo "shard $i: missing everywhere"
+              miss=$((miss + 1))
+              continue
+            fi
+            c=$(grep -c '^// function ' "$f" || true)
+            d=$(grep -c '^// decompile failed' "$f" || true)
+            echo "shard $i: $c blocks, $d failed (from $src)"
+            tot=$((tot + c))
+            bad=$((bad + d))
+            cat "$f" >> bedrock_server.c
+          done
+          echo "total function blocks: $tot"
+          echo "total failed blocks: $bad"
+          ls -lh bedrock_server.c
+          wc -l bedrock_server.c
+          if [ "$miss" -ne 0 ]; then
+            echo "ERROR: $miss shard(s) missing"
+            exit 1
+          fi
+
+      - name: Upload final C
+        uses: actions/upload-artifact@v4
+        with:
+          name: decompiled-bds-final
+          path: bedrock_server.c
+          retention-days: 90

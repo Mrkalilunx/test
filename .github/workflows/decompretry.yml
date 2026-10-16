@@ -22,6 +22,10 @@ on:
         description: 回填单函数超时秒数
         required: true
         default: "300"
+      shard_filter:
+        description: 只跑指定分片,逗号分隔,留空为全部分片
+        required: false
+        default: ""
 
 env:
   GHIDRA_VERSION: 12.1.4
@@ -86,9 +90,16 @@ jobs:
       - name: Generate shard list
         id: gen
         run: |
-          n="${{ inputs.shards }}"
-          echo "shardcount=$n" >> "$GITHUB_OUTPUT"
-          echo "shardlist=[$(seq 0 $((n - 1)) | paste -sd, -)]" >> "$GITHUB_OUTPUT"
+          f="${{ inputs.shard_filter }}"
+          if [ -n "$f" ]; then
+            list="$f"
+          else
+            n="${{ inputs.shards }}"
+            list="$(seq 0 $((n - 1)) | paste -sd, -)"
+          fi
+          echo "shardlist=[$list]" >> "$GITHUB_OUTPUT"
+          echo "shardcount=${{ inputs.shards }}" >> "$GITHUB_OUTPUT"
+          echo "matrix=$list"
 
   retry:
     needs: plan
