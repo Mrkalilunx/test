@@ -90,6 +90,7 @@ jobs:
           GHIDRA_HEADLESS_MAXMEM: 12G
         run: |
           set -euo pipefail
+          mkdir -p proj
           nproc
           free -h
           time "$GHIDRA_DIR/support/analyzeHeadless" \
