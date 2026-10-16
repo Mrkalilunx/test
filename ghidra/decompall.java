@@ -166,7 +166,7 @@ public class decompall extends GhidraScript {
         }
 
         CachingPool<DecompInterface> pool = new CachingPool<>(new Factory(currentProgram));
-        Callback cb = new Callback(pool, timeoutSec);
+        Callback cb = new Callback(pool, timeoutSec, true);
         ChunkingParallelDecompiler<Result> pd =
             ParallelDecompiler.createChunkingParallelDecompiler(cb, monitor);
 
@@ -183,9 +183,6 @@ public class decompall extends GhidraScript {
                     if (r.code != null) {
                         bodies.put(r.entry.toString(), r.code);
                         recovered++;
-                    }
-                    else {
-                        println("still failed: " + r.name + " @ " + r.entry + " : " + r.err);
                     }
                 }
             }
@@ -275,6 +272,7 @@ public class decompall extends GhidraScript {
             }
             else {
                 pw.println(FAILED_MARK);
+                println("fail: " + r.name + " @ " + r.entry + " : " + r.err);
             }
             pw.println();
         }
@@ -330,11 +328,19 @@ public class decompall extends GhidraScript {
 
         private final CachingPool<DecompInterface> pool;
         private final int timeoutSec;
+        // 回填时逐函数打印结果,被抢占也能看到进展与原因
+        private final boolean verbose;
 
         Callback(CachingPool<DecompInterface> pool, int timeoutSec)
         {
+            this(pool, timeoutSec, false);
+        }
+
+        Callback(CachingPool<DecompInterface> pool, int timeoutSec, boolean verbose)
+        {
             this.pool = pool;
             this.timeoutSec = timeoutSec;
+            this.verbose = verbose;
         }
 
         @Override
@@ -345,25 +351,39 @@ public class decompall extends GhidraScript {
             }
             // pool.get() 会抛受检异常
             DecompInterface di = pool.get();
+            Result r;
             try {
                 DecompileResults res = di.decompileFunction(func, timeoutSec, m);
                 if (res != null && res.decompileCompleted()) {
                     DecompiledFunction df = res.getDecompiledFunction();
                     if (df != null) {
-                        return new Result(func.getName(), func.getEntryPoint(), df.getC(), null);
+                        r = new Result(func.getName(), func.getEntryPoint(), df.getC(), null);
                     }
-                    return new Result(func.getName(), func.getEntryPoint(), null,
-                        "no C output");
+                    else {
+                        r = new Result(func.getName(), func.getEntryPoint(), null,
+                            "no C output");
+                    }
                 }
-                String err = res == null ? "null result" : res.getErrorMessage();
-                if (err != null) {
-                    err = err.replace('\n', ' ');
+                else {
+                    String err = res == null ? "null result" : res.getErrorMessage();
+                    if (err != null) {
+                        err = err.replace('\n', ' ');
+                    }
+                    r = new Result(func.getName(), func.getEntryPoint(), null, err);
                 }
-                return new Result(func.getName(), func.getEntryPoint(), null, err);
             }
             finally {
                 pool.release(di);
             }
+            if (verbose) {
+                if (r.code != null) {
+                    println("retry ok: " + r.name + " @ " + r.entry);
+                }
+                else {
+                    println("retry fail: " + r.name + " @ " + r.entry + " : " + r.err);
+                }
+            }
+            return r;
         }
     }
 }
