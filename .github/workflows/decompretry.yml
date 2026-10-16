@@ -1,0 +1,234 @@
+name: decompile-bds-retry
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_run:
+        description: 含 shard-* 产物的运行 id
+        required: true
+      bds_version:
+        description: Bedrock Dedicated Server 版本
+        required: true
+        default: 1.26.52.3
+      analysis_timeout:
+        description: 分析阶段上限秒数,必须与源运行一致才能命中工程缓存
+        required: true
+        default: "3600"
+      shards:
+        description: 分片数,必须与源运行一致
+        required: true
+        default: "8"
+      retry_timeout:
+        description: 回填单函数超时秒数
+        required: true
+        default: "300"
+
+env:
+  GHIDRA_VERSION: 12.1.4
+  GHIDRA_DATE: 20260921
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      shardlist: ${{ steps.gen.outputs.shardlist }}
+      shardcount: ${{ steps.gen.outputs.shardcount }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Install Ghidra
+        run: |
+          set -euo pipefail
+          ZIP="ghidra_${GHIDRA_VERSION}_PUBLIC_${GHIDRA_DATE}.zip"
+          URL="https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_${GHIDRA_VERSION}_build/${ZIP}"
+          curl -fL --retry 3 -o "/tmp/${ZIP}" "$URL"
+          unzip -q "/tmp/${ZIP}" -d "$HOME"
+          echo "GHIDRA_DIR=$HOME/ghidra_${GHIDRA_VERSION}_PUBLIC" >> "$GITHUB_ENV"
+
+      - name: Validate retry script on small sample
+        env:
+          GHIDRA_HEADLESS_MAXMEM: 4G
+        run: |
+          set -euo pipefail
+          mkdir -p out "$RUNNER_TEMP/valproj"
+          "$GHIDRA_DIR/support/analyzeHeadless" \
+            "$RUNNER_TEMP/valproj" val \
+            -import "$PWD/sample/helloaarch64" \
+            -scriptPath "$PWD/ghidra" \
+            -postScript decompall.java "$PWD/out/validate.c" \
+            -deleteProject
+          test -s out/validate.c
+          echo "validate blocks: $(grep -c '^// function ' out/validate.c)"
+          # 从产出里挑一个函数块,人为标成失败,验证回填能把它修回来
+          line=$(grep -m1 '^// function ' out/validate.c)
+          echo "picked: $line"
+          printf '%s\n%s\n\n' "$line" '// decompile failed' > out/inject.c
+          "$GHIDRA_DIR/support/analyzeHeadless" \
+            "$RUNNER_TEMP/valproj" val2 \
+            -import "$PWD/sample/helloaarch64" \
+            -scriptPath "$PWD/ghidra" \
+            -postScript decompall.java "$PWD/out/inject.c" 0 1 retry 120 \
+            -deleteProject
+          if grep -q '^// decompile failed' out/inject.c; then
+            echo "ERROR: retry did not recover the injected block"
+            cat out/inject.c
+            exit 1
+          fi
+          echo "retry validate ok, lines: $(wc -l < out/inject.c)"
+
+      - name: Generate shard list
+        id: gen
+        run: |
+          n="${{ inputs.shards }}"
+          echo "shardcount=$n" >> "$GITHUB_OUTPUT"
+          echo "shardlist=[$(seq 0 $((n - 1)) | paste -sd, -)]" >> "$GITHUB_OUTPUT"
+
+  retry:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.shardlist) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Install Ghidra
+        run: |
+          set -euo pipefail
+          ZIP="ghidra_${GHIDRA_VERSION}_PUBLIC_${GHIDRA_DATE}.zip"
+          URL="https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_${GHIDRA_VERSION}_build/${ZIP}"
+          curl -fL --retry 3 -o "/tmp/${ZIP}" "$URL"
+          unzip -q "/tmp/${ZIP}" -d "$HOME"
+          echo "GHIDRA_DIR=$HOME/ghidra_${GHIDRA_VERSION}_PUBLIC" >> "$GITHUB_ENV"
+
+      - name: Download bedrock_server from release
+        run: |
+          set -euo pipefail
+          mkdir -p work
+          URL="https://github.com/Mrkalilunx/test/releases/download/bds-${{ inputs.bds_version }}/bedrock_server"
+          curl -fL --retry 3 --http1.1 -o work/bedrock_server "$URL"
+          chmod +x work/bedrock_server
+
+      - name: Restore analyzed project
+        uses: actions/cache/restore@v4
+        with:
+          path: proj
+          key: bdsproj-v1-${{ inputs.bds_version }}-ghidra${{ env.GHIDRA_VERSION }}-at${{ inputs.analysis_timeout }}
+          fail-on-cache-miss: true
+
+      - name: Download original shard
+        uses: actions/download-artifact@v4
+        with:
+          name: shard-${{ matrix.shard }}
+          path: in
+          run-id: ${{ inputs.source_run }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Retry failed functions
+        env:
+          GHIDRA_HEADLESS_MAXMEM: 12G
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          OUT="$PWD/out/shard-${{ matrix.shard }}.c"
+          cp "in/shard-${{ matrix.shard }}.c" "$OUT"
+          echo "before: $(grep -c '^// function ' "$OUT") blocks, $(grep -c '^// decompile failed' "$OUT" || true) failed"
+          time "$GHIDRA_DIR/support/analyzeHeadless" \
+            "$PWD/proj" bds \
+            -process bedrock_server \
+            -noanalysis \
+            -scriptPath "$PWD/ghidra" \
+            -postScript decompall.java "$OUT" 0 1 retry ${{ inputs.retry_timeout }} \
+            -max-cpu 4
+          echo "after: $(grep -c '^// function ' "$OUT") blocks, $(grep -c '^// decompile failed' "$OUT" || true) failed"
+          ls -lh "$OUT"
+
+      - name: Upload fixed shard
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shardfix-${{ matrix.shard }}
+          path: out/shard-${{ matrix.shard }}.c
+          if-no-files-found: warn
+          retention-days: 3
+
+  finalize:
+    needs: [plan, retry]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Download original shards
+        uses: actions/download-artifact@v4
+        with:
+          pattern: shard-*
+          path: orig
+          merge-multiple: true
+          run-id: ${{ inputs.source_run }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download fixed shards
+        uses: actions/download-artifact@v4
+        with:
+          pattern: shardfix-*
+          path: fixed
+          merge-multiple: true
+
+      - name: Merge shards
+        run: |
+          set -euo pipefail
+          n="${{ needs.plan.outputs.shardcount }}"
+          echo "=== orig ==="; ls -lh orig || true
+          echo "=== fixed ==="; ls -lh fixed || true
+          : > bedrock_server.c
+          tot=0
+          bad=0
+          miss=0
+          for i in $(seq 0 $((n - 1))); do
+            f="fixed/shard-$i.c"
+            src="fixed"
+            if [ ! -s "$f" ]; then
+              f="orig/shard-$i.c"
+              src="orig"
+            fi
+            if [ ! -s "$f" ]; then
+              echo "shard $i: missing everywhere"
+              miss=$((miss + 1))
+              continue
+            fi
+            c=$(grep -c '^// function ' "$f" || true)
+            d=$(grep -c '^// decompile failed' "$f" || true)
+            echo "shard $i: $c blocks, $d failed (from $src)"
+            tot=$((tot + c))
+            bad=$((bad + d))
+            cat "$f" >> bedrock_server.c
+          done
+          echo "total function blocks: $tot"
+          echo "total failed blocks: $bad"
+          ls -lh bedrock_server.c
+          wc -l bedrock_server.c
+          if [ "$miss" -ne 0 ]; then
+            echo "ERROR: $miss shard(s) missing"
+            exit 1
+          fi
+
+      - name: Upload merged C
+        uses: actions/upload-artifact@v4
+        with:
+          name: decompiled-bds-fixed
+          path: bedrock_server.c
