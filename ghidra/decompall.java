@@ -2,9 +2,10 @@
  * decompall
  * 无头模式并行反编译当前程序全部函数,导出为单个 C 文件
  * 用 ChunkingParallelDecompiler 让多个反编译器同时跑,缓解大二进制的耗时
+ * 支持分片:多个 job 各跑一片,合并时按分片号顺序拼接
  * 用法:
- *   analyzeHeadless <项目目录> <项目名> -import <二进制> \
- *     -scriptPath <脚本目录> -postScript decompall.java <输出文件>
+ *   analyzeHeadless <项目目录> <项目名> -process <程序> \
+ *     -scriptPath <脚本目录> -postScript decompall.java <输出文件> [分片号] [分片总数]
  */
 import java.io.FileWriter;
 import java.io.IOException;
@@ -39,6 +40,9 @@ public class decompall extends GhidraScript {
     {
         String[] args = getScriptArgs();
         String outPath = args.length > 0 ? args[0] : "decompiled.c";
+        // 分片号与分片总数,只处理 index % shards == shard 的函数
+        int shard = args.length > 1 ? Integer.parseInt(args[1]) : 0;
+        int shards = args.length > 2 ? Integer.parseInt(args[2]) : 1;
 
         CachingPool<DecompInterface> pool = new CachingPool<>(new Factory(currentProgram));
         Callback cb = new Callback(pool);
@@ -49,19 +53,26 @@ public class decompall extends GhidraScript {
         int total = 0;
         int ok = 0;
         try {
-            // 文件头记录目标元信息
-            pw.println("// target: " + currentProgram.getName());
-            pw.println("// format: " + currentProgram.getExecutableFormat());
-            pw.println("// language: " + currentProgram.getLanguageID());
-            pw.println("// imagebase: " + currentProgram.getImageBase());
-            pw.println();
+            // 只有 0 号分片写文件头,合并时直接按分片顺序拼接即可
+            if (shard == 0) {
+                pw.println("// target: " + currentProgram.getName());
+                pw.println("// format: " + currentProgram.getExecutableFormat());
+                pw.println("// language: " + currentProgram.getLanguageID());
+                pw.println("// imagebase: " + currentProgram.getImageBase());
+                pw.println();
+            }
 
             FunctionIterator it = currentProgram.getFunctionManager().getFunctions(true);
             List<Function> buf = new ArrayList<>();
-            // 逐个函数收集,成批交给并行反编译器
+            int idx = 0;
+            // 逐个函数收集,属于本分片的才留下,成批交给并行反编译器
             while (it.hasNext()) {
                 Function func = it.next();
                 if (func.isExternal()) {
+                    continue;
+                }
+                int mine = idx++ % shards;
+                if (mine != shard) {
                     continue;
                 }
                 buf.add(func);
@@ -85,7 +96,8 @@ public class decompall extends GhidraScript {
         }
 
         // so: 如需按函数拆分成多个文件,可在 flush 里改成每函数写独立文件
-        println("decompiled " + ok + "/" + total + " functions -> " + outPath);
+        println("shard " + shard + "/" + shards + " decompiled " + ok + "/" + total
+            + " functions -> " + outPath);
     }
 
     // 并行反编译一批函数并按原顺序落盘,返回 {总数, 成功数}

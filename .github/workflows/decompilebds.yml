@@ -7,15 +7,26 @@ on:
         description: Bedrock Dedicated Server 版本
         required: true
         default: 1.26.52.3
+      shards:
+        description: 并行反编译分片数
+        required: true
+        default: "8"
+      analysis_timeout:
+        description: 分析阶段上限秒数
+        required: true
+        default: "3600"
 
 env:
   GHIDRA_VERSION: 12.1.4
   GHIDRA_DATE: 20260921
 
 jobs:
-  bedrock:
+  prepare:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 150
+    outputs:
+      shardlist: ${{ steps.gen.outputs.shardlist }}
+      shardcount: ${{ steps.gen.outputs.shardcount }}
     steps:
       - uses: actions/checkout@v4
 
@@ -43,7 +54,6 @@ jobs:
           curl -fL --retry 3 --http1.1 -o work/bedrock_server "$URL"
           chmod +x work/bedrock_server
           ls -lh work/bedrock_server
-          file work/bedrock_server
 
       - name: Validate decompile script on small sample
         env:
@@ -60,35 +70,151 @@ jobs:
           test -s out/validate.c
           echo "validate function blocks: $(grep -c '^// function ' out/validate.c)"
 
-      - name: Decompile bedrock_server with Ghidra headless
+      - name: Generate shard list
+        id: gen
+        run: |
+          n="${{ inputs.shards }}"
+          echo "shardcount=$n" >> "$GITHUB_OUTPUT"
+          echo "shardlist=[$(seq 0 $((n - 1)) | paste -sd, -)]" >> "$GITHUB_OUTPUT"
+
+      - name: Restore analyzed project
+        id: proj
+        uses: actions/cache/restore@v4
+        with:
+          path: proj
+          key: bdsproj-v1-${{ inputs.bds_version }}-ghidra${{ env.GHIDRA_VERSION }}-at${{ inputs.analysis_timeout }}
+
+      - name: Analyze bedrock_server
+        if: steps.proj.outputs.cache-hit != 'true'
         env:
           GHIDRA_HEADLESS_MAXMEM: 12G
         run: |
           set -euo pipefail
-          mkdir -p out "$RUNNER_TEMP/ghidraproj"
           nproc
           free -h
           time "$GHIDRA_DIR/support/analyzeHeadless" \
-            "$RUNNER_TEMP/ghidraproj" bds \
+            "$PWD/proj" bds \
             -import "$PWD/work/bedrock_server" \
-            -scriptPath "$PWD/ghidra" \
-            -postScript decompall.java "$PWD/out/bedrock_server.c" \
-            -analysisTimeoutPerFile 3600 \
-            -max-cpu 4 \
-            -deleteProject
+            -analysisTimeoutPerFile "${{ inputs.analysis_timeout }}" \
+            -max-cpu 4
+          du -sh proj
 
-      - name: Inspect result
-        if: always()
+      - name: Save analyzed project
+        if: steps.proj.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: proj
+          key: bdsproj-v1-${{ inputs.bds_version }}-ghidra${{ env.GHIDRA_VERSION }}-at${{ inputs.analysis_timeout }}
+
+  decompile:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.prepare.outputs.shardlist) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Install Ghidra
         run: |
-          ls -lh out/ || true
-          wc -l out/*.c || true
-          du -h out/*.c || true
-          sed -n '1,30p' out/*.c || true
+          set -euo pipefail
+          ZIP="ghidra_${GHIDRA_VERSION}_PUBLIC_${GHIDRA_DATE}.zip"
+          URL="https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_${GHIDRA_VERSION}_build/${ZIP}"
+          curl -fL --retry 3 -o "/tmp/${ZIP}" "$URL"
+          unzip -q "/tmp/${ZIP}" -d "$HOME"
+          echo "GHIDRA_DIR=$HOME/ghidra_${GHIDRA_VERSION}_PUBLIC" >> "$GITHUB_ENV"
 
-      - name: Upload decompiled C
+      - name: Download bedrock_server from release
+        run: |
+          set -euo pipefail
+          mkdir -p work
+          URL="https://github.com/Mrkalilunx/test/releases/download/bds-${{ inputs.bds_version }}/bedrock_server"
+          curl -fL --retry 3 --http1.1 -o work/bedrock_server "$URL"
+          chmod +x work/bedrock_server
+
+      - name: Restore analyzed project
+        uses: actions/cache/restore@v4
+        with:
+          path: proj
+          key: bdsproj-v1-${{ inputs.bds_version }}-ghidra${{ env.GHIDRA_VERSION }}-at${{ inputs.analysis_timeout }}
+          fail-on-cache-miss: true
+
+      - name: Decompile shard
+        env:
+          GHIDRA_HEADLESS_MAXMEM: 12G
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          OUT="$PWD/out/shard-${{ matrix.shard }}.c"
+          time "$GHIDRA_DIR/support/analyzeHeadless" \
+            "$PWD/proj" bds \
+            -process bedrock_server \
+            -noanalysis \
+            -scriptPath "$PWD/ghidra" \
+            -postScript decompall.java "$OUT" ${{ matrix.shard }} ${{ needs.prepare.outputs.shardcount }} \
+            -max-cpu 4
+          ls -lh "$OUT"
+          grep -c '^// function ' "$OUT" || true
+
+      - name: Upload shard
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: decompiled-bds
-          path: out/
+          name: shard-${{ matrix.shard }}
+          path: out/shard-${{ matrix.shard }}.c
           if-no-files-found: warn
+          retention-days: 3
+
+  merge:
+    needs: [prepare, decompile]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: shard-*
+          path: shards
+          merge-multiple: true
+
+      - name: Merge shards
+        run: |
+          set -euo pipefail
+          n="${{ needs.prepare.outputs.shardcount }}"
+          ls -lh shards
+          : > bedrock_server.c
+          tot=0
+          miss=0
+          for i in $(seq 0 $((n - 1))); do
+            f="shards/shard-$i.c"
+            if [ ! -s "$f" ]; then
+              echo "missing or empty: $f"
+              miss=$((miss + 1))
+              continue
+            fi
+            c=$(grep -c '^// function ' "$f" || true)
+            echo "shard $i: $c functions"
+            tot=$((tot + c))
+            cat "$f" >> bedrock_server.c
+          done
+          echo "total function blocks: $tot"
+          ls -lh bedrock_server.c
+          wc -l bedrock_server.c
+          if [ "$miss" -ne 0 ]; then
+            echo "ERROR: $miss shard(s) missing"
+            exit 1
+          fi
+
+      - name: Upload merged C
+        uses: actions/upload-artifact@v4
+        with:
+          name: decompiled-bds
+          path: bedrock_server.c
