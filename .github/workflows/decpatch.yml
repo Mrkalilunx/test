@@ -23,6 +23,18 @@ on:
         description: 只跑指定切片,逗号分隔,留空为全部
         required: false
         default: ""
+      headless_maxmem:
+        description: Java 堆上限,只约束堆,反编译器原生进程不受其约束
+        required: true
+        default: "8G"
+      max_cpu:
+        description: 并行反编译线程数,每个线程会拉起一个原生反编译器进程,越大内存峰值越高
+        required: true
+        default: "2"
+      swap_gb:
+        description: 额外 swap 大小(GB),0 表示不动,用于吸收反编译器原生内存尖峰
+        required: true
+        default: "8"
 
 env:
   GHIDRA_VERSION: 12.1.4
@@ -91,6 +103,30 @@ jobs:
           key: bdsproj-v1-${{ inputs.bds_version }}-ghidra${{ env.GHIDRA_VERSION }}-at${{ inputs.analysis_timeout }}
           fail-on-cache-miss: true
 
+      - name: Show resources and raise swap
+        run: |
+          set -uo pipefail
+          echo "--- 变更前 ---"
+          free -h
+          df -h / /mnt 2>/dev/null | tail -3
+          n="${{ inputs.swap_gb }}"
+          if [ "$n" != "0" ]; then
+            sudo swapoff -a 2>/dev/null || true
+            sudo rm -f /mnt/swapfile 2>/dev/null || true
+            if sudo fallocate -l "${n}G" /mnt/swapfile 2>/dev/null \
+              || sudo dd if=/dev/zero of=/mnt/swapfile bs=1M count=$((n * 1024)) status=none 2>/dev/null; then
+              sudo chmod 600 /mnt/swapfile
+              sudo mkswap /mnt/swapfile > /dev/null 2>&1
+              sudo swapon /mnt/swapfile 2>/dev/null || echo "swapon 失败"
+            else
+              echo "swap 文件创建失败,跳过(磁盘不足)"
+              sudo rm -f /mnt/swapfile 2>/dev/null || true
+            fi
+          fi
+          echo "--- 变更后 ---"
+          free -h
+          df -h / /mnt 2>/dev/null | tail -3
+
       - name: Build patch input
         run: |
           set -euo pipefail
@@ -103,7 +139,7 @@ jobs:
 
       - name: Retry failed functions
         env:
-          GHIDRA_HEADLESS_MAXMEM: 12G
+          GHIDRA_HEADLESS_MAXMEM: ${{ inputs.headless_maxmem }}
         run: |
           set -euo pipefail
           OUT="$PWD/out/patch-${{ matrix.slice }}.c"
@@ -113,10 +149,12 @@ jobs:
             -noanalysis \
             -scriptPath "$PWD/ghidra" \
             -postScript decompall.java "$OUT" 0 1 retry ${{ inputs.retry_timeout }} \
-            -max-cpu 4
+            -max-cpu ${{ inputs.max_cpu }}
           total=$(grep -c '^// function ' "$OUT" || true)
           left=$(grep -c '^// decompile failed' "$OUT" || true)
           echo "recovered $((total - left)) of $total, still failed $left"
+          echo "--- 反编译后资源 ---"
+          free -h
 
       - name: Upload patch
         if: always()
