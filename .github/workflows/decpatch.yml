@@ -35,6 +35,10 @@ on:
         description: 额外 swap 大小(GB),0 表示不动,用于吸收反编译器原生内存尖峰
         required: true
         default: "8"
+      patch_prefix:
+        description: 补丁产物名前缀,细粒度切片时换一个前缀以免与既有补丁重名
+        required: true
+        default: "patch"
 
 env:
   GHIDRA_VERSION: 12.1.4
@@ -131,7 +135,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p out
-          IN="$PWD/out/patch-${{ matrix.slice }}.c"
+          IN="$PWD/out/${{ inputs.patch_prefix }}-${{ matrix.slice }}.c"
           awk -v s="${{ matrix.slice }}" -v n="${{ needs.plan.outputs.slicecount }}" \
             'NR % n == s { print; print "// decompile failed" }' \
             ghidra/failedlist.txt > "$IN"
@@ -142,7 +146,13 @@ jobs:
           GHIDRA_HEADLESS_MAXMEM: ${{ inputs.headless_maxmem }}
         run: |
           set -euo pipefail
-          OUT="$PWD/out/patch-${{ matrix.slice }}.c"
+          OUT="$PWD/out/${{ inputs.patch_prefix }}-${{ matrix.slice }}.c"
+          ( while true; do
+              echo "[mem $(date -u +%H:%M:%S) used=$(free -m | awk '/^Mem:/{print $3}')M avail=$(free -m | awk '/^Mem:/{print $7}')M swapused=$(free -m | awk '/^Swap:/{print $3}')M]"
+              sleep 20
+            done ) &
+          SAMPLER=$!
+          trap 'kill $SAMPLER 2>/dev/null || true' EXIT
           time "$GHIDRA_DIR/support/analyzeHeadless" \
             "$PWD/proj" bds \
             -process bedrock_server \
@@ -160,7 +170,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: patch-${{ matrix.slice }}
-          path: out/patch-${{ matrix.slice }}.c
+          name: ${{ inputs.patch_prefix }}-${{ matrix.slice }}
+          path: out/${{ inputs.patch_prefix }}-${{ matrix.slice }}.c
           if-no-files-found: warn
           retention-days: 3
